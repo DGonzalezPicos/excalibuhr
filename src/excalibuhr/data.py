@@ -27,7 +27,7 @@ class SPEC2D:
         fmt: string
             
         """
-        
+        self.filename = filename
         if filename is not None:
             ext = filename.split('.')[-1]
             if ext == "fits":
@@ -110,6 +110,20 @@ class SPEC2D:
             dt.err = err
         dt.reformat_data()
         return dt
+    
+    def update_airmass(self, airmass_start=None, airmass_end=None, save=True):
+        assert hasattr(self, 'header'), "No header found in the object"
+        assert 'ESO TEL AIRM START' in self.header, "No airmass information found in the header"
+        if airmass_start is not None:
+            self.header['ESO TEL AIRM START'] = airmass_start
+        if airmass_end is not None:
+            self.header['ESO TEL AIRM END'] = airmass_end
+            
+            
+        if save:
+            su.wfits(self.filename, dict(WAVE=self.wlen, FLUX=self.flux, FLUX_ERR=self.err), header=self.header)
+            print(f"[update_airmass]: Saved to {self.filename}")
+        return self
 
     def get_spec1d(self):
         if self.err is not None:
@@ -343,9 +357,10 @@ class SPEC2D:
             unraveled.append(dt.flatten())
         header = "Wlen(nm) Flux Flux_err"
         np.savetxt(savename, np.transpose(unraveled), header=header)
+        print("[save_spec1d]: Saved to {}".format(savename))
 
 
-    def plot_spec1d(self, savename, show=False):
+    def plot_spec1d(self, savename=None, show=False):
         self._set_plot_style()
         nrows = self.wlen.shape[0]//3
         if self.wlen.shape[0]%3 != 0:

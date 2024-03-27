@@ -2336,14 +2336,14 @@ def stack_ragged(array_list, axis=0):
 
 
 def load_extr2D(filename):
-        data = np.load(filename)
-        D = data['FLUX']
-        V = data['FLUX_ERR']
-        P = data['MODEL']
-        id_det = data['id_det']
-        id_order = data['id_order']
-        chi2 = data['chi2']
-        return D, P, V, id_det, id_order, chi2
+    data = np.load(filename)
+    D = data['FLUX']
+    V = data['FLUX_ERR']
+    P = data['MODEL']
+    id_det = data['id_det']
+    id_order = data['id_order']
+    chi2 = data['chi2']
+    return D, P, V, id_det, id_order, chi2
 
 
 def create_eso_recipe_config(eso_recipe, outpath, verbose):
@@ -2539,7 +2539,7 @@ def create_eso_recipe_config(eso_recipe, outpath, verbose):
         if not verbose:
             print(" [DONE]")
 
-def molecfit(input_path, spec, wave_range=None, savename=None, verbose=False):
+def molecfit(input_path, spec, wave_range=None, Nedge=10, savename=None, verbose=False):
     """
     A wrapper of molecfit for telluric correction
     From pycrires (see https://pycrires.readthedocs.io)
@@ -2568,7 +2568,6 @@ def molecfit(input_path, spec, wave_range=None, savename=None, verbose=False):
 
     hdul_out = fits.HDUList([primary_hdu])
 
-    Nedge = 10 #avoid edges of the detectors
     w0 = spec.wlen[:,Nedge]
     w1 = spec.wlen[:,-Nedge]
     if wave_range is None:
@@ -2757,3 +2756,76 @@ def molecfit(input_path, spec, wave_range=None, savename=None, verbose=False):
                     #   tellu['flux'], tellu['cflux']
                     ],
                     header='#Wavelength(nm) Transmission')
+def fig_order_subplots(n_orders, ylabel, xlabel=r'Wavelength (nm)',
+                       figsize=(14, 2.5)):
+
+    figsize = (figsize[0], figsize[1]*n_orders)
+    fig, ax = plt.subplots(
+        figsize=figsize, nrows=n_orders, 
+        gridspec_kw={'hspace':0.22, 'left':0.1, 'right':0.95, 
+                     'top':(1-0.02*7/n_orders), 'bottom':0.035*7/n_orders, 
+                     }
+        )
+    if n_orders == 1:
+        ax = np.array([ax])
+
+    ax[n_orders//2].set(ylabel=ylabel)
+    ax[-1].set(xlabel=xlabel)
+
+    return fig, ax
+
+def remove_continuum_dense_lines(wave, flux, deg=2, 
+                                 flat_threshold=0.1,
+                                 new_wave=None,
+                                 debug=False):
+    """Identify the continuum regions with the gradient of the spectrum
+    and fit a `deg`-polynomial of to them.
+    Parameters
+    ----------
+        wave : np.ndarray
+            Wavelength array.
+        flux : np.ndarray
+            Flux array.
+        deg : int
+            Degree of the polynomial to fit.
+        debug : bool
+            Show debug plot.
+    Returns
+    -------
+        continuum : np.ndarray
+            The continuum array.
+        """
+    assert len(np.shape(flux)) == 1, 'Flux must be 1D'
+    
+    grad = np.abs(np.gradient(flux))
+    # flat_regions = grad < flat_threshold
+    flat_regions = grad < np.nanquantile(grad, 0.1)
+    assert np.sum(flat_regions) > 0, 'No flat regions found'
+    polyfit = np.polyfit(wave[flat_regions], flux[flat_regions], deg)
+    
+    continuum = np.polyval(polyfit, wave)
+    if new_wave is not None:
+        new_continuum = np.polyval(polyfit, new_wave)
+    if debug:
+        fig, ax = plt.subplots(2, 1, figsize=(16, 6),
+                                 gridspec_kw={'height_ratios': [2, 1]},
+                                 sharex=True)
+        
+        flux_continuum = np.where(~flat_regions, np.nan, flux) # continuum regions
+        flux_lines = np.where(flat_regions, np.nan, flux) # lines regions
+        ax[0].plot(wave, flux_continuum, color='g')
+        ax[0].plot(wave, flux_lines, color='k', alpha=0.2)
+        
+        ax[0].plot(wave, continuum, label='Continuum', color='magenta')
+        if new_wave is not None:
+            ax[0].plot(new_wave, new_continuum, label='Continuum', color='cyan')
+        ax[1].plot(wave, flux / continuum, label='Continuum removed', color='k', lw=1.)
+        ax[1].axhline(1, color='magenta', ls='-', alpha=0.8)
+        ax[0].legend()
+        ax[0].set(ylabel='Flux')
+        ax[-1].set(xlabel='Wavelength [nm]', ylabel='Flux / Continuum')
+        plt.show()
+        
+    if new_wave is not None:
+        return new_continuum
+    return continuum

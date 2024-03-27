@@ -76,7 +76,7 @@ class CriresPipeline:
         self.header_file = os.path.join(self.nightpath, "header_info.txt")
         self.product_file = os.path.join(self.nightpath, "product_info.txt")
         self.gain = [2.15, 2.19, 2.0]
-        self.pix_scale = 0.056 #arcsec # Updated from old 0.059
+        self.pix_scale = 0.056 #arcsec
         self.trace_offset = 0
 
         print(f"Data reduction folder: {self.nightpath}")
@@ -577,7 +577,7 @@ class CriresPipeline:
                 ax = axes[Norder-1-i, d]
                 y = flux[d, i]
                 nans = np.isnan(y)
-                vmin, vmax = np.nanpercentile(y[~nans], (1, 99))
+                vmin, vmax = np.percentile(y[~nans], (1, 99))
                 ymin = min(vmin, ymin)
                 ymax = max(vmax, ymax)
                 if wlen is None:
@@ -594,10 +594,7 @@ class CriresPipeline:
                                 transm_spec[:,1][indices]*vmax, 
                                 color='orange',
                                 label='Telluric template')
-            try:
-                ax.set_ylim((0.8*ymin, 1.1*ymax))
-            except UserWarning:
-                pass
+            ax.set_ylim((0.8*ymin, 1.1*ymax))
         
         for d in range(Ndet):    
             axes[0,d].set_title(f"Detector {d}", size='large', 
@@ -910,7 +907,6 @@ class CriresPipeline:
 
             print("\n Output files:")
             # Save the polynomial coefficients
-            print(f'testing this...')
             file_name = os.path.join(self.calpath, f'TW_FLAT_{item_wlen}.fits')
             su.wfits(file_name, ext_list={"FLUX": trace}, header=hdr)
             self._add_to_calib(f'TW_FLAT_{item_wlen}.fits', "TRACE_TW")
@@ -1127,6 +1123,26 @@ class CriresPipeline:
             file_name = os.path.join(self.calpath, f'TW_FLAT_{item_wlen}.fits')
             su.wfits(file_name, ext_list={"FLUX": trace_update}, header=hdr)
         
+    def check_unique_targets(self, file='header', object=None):
+        ''' Check unique targets in the header_info table
+        Store the unique targets in the attribute `unique_target`
+        '''
+        
+        file_info = getattr(self, file+'_info')
+        indices = file_info[self.key_catg] == "SCIENCE"
+        unique_target = set(file_info[indices][self.key_target_name])
+        if object is not None:
+            assert object in unique_target, f"Target {object} not found in the raw folder ({unique_target})"
+            unique_target = set([object])
+
+        
+        if len(unique_target) == 0:
+            raise Exception("No SCIENCE data found in the raw folder")
+        else:
+            print(f"Targets: {unique_target}")
+        
+        setattr(self, 'unique_target', unique_target)
+        return self
             
 
     @print_runtime
@@ -1143,6 +1159,10 @@ class CriresPipeline:
             the A and B nodding frames will be treated separately. By default, the 
             code read from the data header to determine the mode. It is necessary 
             to use this parameter only if one needs to force a specific mode.
+        targets : str or list
+            Specify the target(s) to process. If `targets='all'`, all targets will be
+            processed. If `targets` is a list of strings, only the targets in the list
+            will be processed.
 
         Returns
         -------
@@ -1161,27 +1181,20 @@ class CriresPipeline:
         pool = Pool(processes=self.num_processes)
         pool_jobs = []
 
-        # Select the science observations
+        # # Select the science observations
         indices = self.header_info[self.key_catg] == "SCIENCE"
 
-        # Check unique targets
-        unique_target = set()
-        for item in self.header_info[indices][self.key_target_name]:
-            unique_target.add(item)
-        if len(unique_target) == 0:
-            raise Exception("No SCIENCE data found in the raw folder")
-        else:
-            print(f"Targets: {unique_target}")
-            
-        if object is not None:
-            assert object in unique_target, f'Target {object} not found in {unique_target}'
-            unique_target = [object]
-
-        # Open the read-out noise file
+        # # Open the read-out noise file
         indices_ron = (self.calib_info[self.key_caltype] == "DARK_RON") 
         file_ron = self.calib_info[indices_ron][self.key_filename].iloc[0]
         ron = fits.getdata(os.path.join(self.calpath, file_ron))
+        
+        # # Check unique targets
+        self.check_unique_targets(file='product', object=object)
+        unique_target = self.unique_target # alias
 
+            
+            
         # Loop over each target
         for object in unique_target:
             print(f"Processing target: {object}")
@@ -1459,6 +1472,9 @@ class CriresPipeline:
             exposure, which is estimated using the extratced spectrum of the target. 
         clip: int
             sigma clipping threshold for rejecting bad pixels
+        object: str
+            the target to process. If `object=None`, all targets will be processed.
+        
         
         Returns
         -------
@@ -1484,17 +1500,22 @@ class CriresPipeline:
         # Select the obs_nodding observations
         indices = (self.product_info[self.key_caltype] == 'NODDING_FRAME')
 
-
-            
         # Check unique targets
         # unique_target = set()
-        unique_target = set(self.product_info[indices][self.key_target_name])
-        if object is not None:
-            assert object in unique_target, f'Target {object} not found in {unique_target}'
-            unique_target = set([object]) 
-
-        if len(unique_target) == 0:
-            raise RuntimeError("No reduced nodding frames to combine")
+        # for item in self.product_info[indices][self.key_target_name]:
+        #     unique_target.add(item)
+        # if len(unique_target) == 0:
+        #     raise RuntimeError("No reduced nodding frames to combine")
+        self.check_unique_targets(file='product', object=object)
+        unique_target = self.unique_target # alias
+        
+        # if isinstance(targets, str):
+        #     unique_target = self.unique_target
+        # if isinstance(targets, list):
+        #     assert set(targets).issubset(unique_target)
+        #     unique_target = set(targets)
+        #     print(f"[obs_nodding_combine]: Targets to process: {targets}")
+        
 
         # Loop over each target
         for object in unique_target:
@@ -1522,7 +1543,6 @@ class CriresPipeline:
 
                 # Loop over the nodding positions
                 INT_total = 0.
-                
                 for pos in ['A', 'B']:
                     # combine the images for each nodding position
                     
@@ -1531,7 +1551,6 @@ class CriresPipeline:
                     
                     frames, frames_err, snrs = [], [], []
                     # Loop over the observations at each nodding position
-                    airmass = []
                     for j, file in enumerate(
                             self.product_info[indices_pos][self.key_filename]):
                         with fits.open(os.path.join(self.outpath, file)) as hdu:
@@ -1546,8 +1565,6 @@ class CriresPipeline:
                                     int(np.round(hdr[self.key_jitter]/self.pix_scale)))
                             frames.append(dt)
                             frames_err.append(dt_err)
-                            airmass.append(hdr[self.key_airmass])
-
                         
                         # get signal to noise ratio of the observation
                         if combine_mode == 'weighted':
@@ -1575,13 +1592,6 @@ class CriresPipeline:
                     file_name = os.path.join(self.noddingpath, 
                             "Combined_"+ object.replace(" ", "") + \
                             f"_{item_wlen}_Nodding_{pos}.fits")
-                    
-                    # update header with airmass_start and airmass_end
-                    # self.key_airmass = 'ESO TEL AIRM END'
-                    hdr[self.key_airmass.replace('END', 'START')] = airmass[0]
-                    hdr[self.key_airmass] = airmass[-1]
-                    print(f'[obs_nodding_combine] Airmass start: {airmass[0]}, Airmass end: {airmass[-1]}')
-                    
                     su.wfits(file_name, ext_list={"FLUX": combined, 
                                 "FLUX_ERR": combined_err}, header=hdr)
                     self._add_to_product("obs_nodding/Combined_"+ \
@@ -1643,15 +1653,17 @@ class CriresPipeline:
         indices = (self.product_info[self.key_caltype] == caltype)
 
         unique_target = set()
-
-        # Check all unique targets
-        for item in self.product_info[indices][self.key_target_name]:
-            unique_target.add(item)
-        if len(unique_target) == 0:
-            raise RuntimeError("No reduced frames to extract")
         if object is not None:
-            assert object in unique_target, f'Target {object} not found in {unique_target}'
-            unique_target = set([object])
+            unique_target.add(object)
+        else:
+            # Check all unique targets
+            for item in self.product_info[indices][self.key_target_name]:
+                unique_target.add(item)
+            if len(unique_target) == 0:
+                raise RuntimeError("No reduced frames to extract")
+            
+        
+        
 
         # Loop over each target
         for object in unique_target:
@@ -1750,11 +1762,8 @@ class CriresPipeline:
 
         #estimate snr of the primary spectra at the middle order
         mid_order = len(flux_pri[0])//2
-        # print(f'[_process_extraction]: {np.array(err_pri)[:, mid_order ,:]}')
         # snr_mid = np.nanmean(np.array(flux_pri)[:, mid_order ,:])
-        snr_mid_arr = np.array(flux_pri)[:, mid_order ,:]/np.array(err_pri)[:, mid_order ,:]
-        nans = np.isnan(snr_mid_arr)
-        snr_mid = np.mean(snr_mid_arr[~nans]).astype(int)
+        snr_mid = np.nanmean(np.array(flux_pri)[:, mid_order ,:]/np.array(err_pri)[:, mid_order ,:]).astype(int)
 
         paths = file.split('/')
         paths[-1] = '_'.join(['Extr1D_PRIMARY', savename, paths[-1]])
@@ -1936,7 +1945,7 @@ class CriresPipeline:
                                     transm_spec=tellu, show=debug)
         
 
-    def save_extracted_data(self, combine=False, object=None):
+    def save_extracted_data(self, combine=False):
         """
         Method for saving extracted spectra and calibrated wavelength.
         to the folder `obs_calibrated`. And save the flattened array to
@@ -1951,9 +1960,6 @@ class CriresPipeline:
         self._print_section("Save extracted spectra")
         
         self.corrpath = os.path.join(self.outpath, "obs_calibrated")
-        # check if the folder exists
-        if not os.path.exists(self.corrpath):
-            os.makedirs(self.corrpath)
 
         # get updated product info
         self.product_info = pd.read_csv(self.product_file, sep=';')
@@ -1967,9 +1973,6 @@ class CriresPipeline:
             unique_target = set()
             for item in self.product_info[indices][self.key_target_name]:
                 unique_target.add(item)
-            if object is not None and len(unique_target) > 1:
-                assert object in unique_target, f'No target {object} found in {unique_target}'
-                unique_target = set([object])
 
             if len(unique_target) == 0:
                 continue
@@ -2006,13 +2009,12 @@ class CriresPipeline:
                         wlen = fits.getdata(os.path.join(self.outpath, file))
                     wlens.append(wlen)
 
-                    dt, dt_err, airmass = [], [], []
+                    dt, dt_err = [], []
                     for file in self.product_info[indices_wlen][self.key_filename]:
                         with fits.open(os.path.join(self.outpath, file)) as hdu:
                             hdr = hdu[0].header
                             dt.append(hdu["FLUX"].data)
                             dt_err.append(hdu["FLUX_ERR"].data)
-                            airmass.append(hdr[self.key_airmass])
                     nframe = len(dt)
                     if combine:
                         # mean-combine each individual frames
@@ -2045,12 +2047,7 @@ class CriresPipeline:
                     err_series = np.array(err_series)
                     snr_mid = np.mean((spec_series/err_series)[:,wlens.shape[0]//2,:], axis=1)
 
-                # update header with airmass_start and airmass_end
-                # self.key_airmass = 'ESO TEL AIRM END'
-                print(f'[save_extracted_data]: Updating airmass in header...')
-                print(f'[save_extracted_data]: airmass start = {airmass[0]}, airmass end = {airmass[-1]}')
-                hdr[self.key_airmass.replace('END', 'START')] = airmass[0]
-                hdr[self.key_airmass] = airmass[-1]
+
                 l = label.split('_')[-1]
                 file_name = os.path.join(self.corrpath, 
                             object.replace(" ", "") +\
@@ -2075,7 +2072,7 @@ class CriresPipeline:
                 if combine:
                     result = SPEC2D(wlen=wlens, flux=spec_series, err=err_series)
                     result.save_spec1d(file_name[:-4]+'dat')
-                    result.plot_spec1d(file_name[:-4]+'png') #FIXME: XIO:  fatal IO error 25 (Inappropriate ioctl for device) on X server ":0"
+                    result.plot_spec1d(file_name[:-4]+'png')
 
 
     def run_skycalc(self, airmass=1.0, pwv=2.5):
@@ -2392,3 +2389,4 @@ class CriresPipeline:
 
         if combine:
             self.obs_nodding_combine(combine_mode=combine_mode)
+

@@ -5,3 +5,5 @@ docs/_build
 docs/_static
 docs/_template
 docs/api
+src/excalibuhr/sort_files.py
+src/excalibuhr/molecfit_gqlup.py
