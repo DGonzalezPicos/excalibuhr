@@ -2,8 +2,8 @@
 
 __all__ = ['CriresPipeline']
 
-
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
 import sys
 import glob
 import time
@@ -12,13 +12,12 @@ import warnings
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import subprocess
 from multiprocessing import Pool
 from astropy.io import fits
 from astroquery.eso import Eso
 import skycalc_ipy
 import excalibuhr.utils as su
-from excalibuhr.data import SPEC2D
+from excalibuhr.data import SPEC, DETECTOR, wfits
 
 import matplotlib.pyplot as plt 
 
@@ -35,7 +34,9 @@ def print_runtime(func):
 
 class CriresPipeline:
 
-    def __init__(self, workpath, night, clean_start = False,
+    def __init__(self, workpath, night, 
+                 obs_mode = 'nod',
+                 clean_start = False,
                  num_processes = 4):
         """
         Parameters
@@ -72,12 +73,15 @@ class CriresPipeline:
         self.rawpath = os.path.join(self.workpath, self.night, "raw")
         self.calpath = os.path.join(self.workpath, self.night, "cal")
         self.outpath = os.path.join(self.workpath, self.night, "out")
+        self.nodpath = os.path.join(self.outpath, "obs_intermediate")
         self.calib_file = os.path.join(self.nightpath, "calib_info.txt") 
         self.header_file = os.path.join(self.nightpath, "header_info.txt")
         self.product_file = os.path.join(self.nightpath, "product_info.txt")
         self.gain = [2.15, 2.19, 2.0]
         self.pix_scale = 0.056 #arcsec # Updated from old 0.059
         self.trace_offset = 0
+
+        self.obs_mode = obs_mode.upper()
 
         print(f"Data reduction folder: {self.nightpath}")
 
@@ -136,6 +140,9 @@ class CriresPipeline:
 
         if not os.path.exists(self.rawpath):
             os.makedirs(self.rawpath)
+
+        if not os.path.exists(self.nodpath):
+            os.makedirs(self.nodpath)
 
 
         # If present, read the info files
@@ -306,7 +313,7 @@ class CriresPipeline:
         file : str
             filename to be added to the table
         cal_type: str 
-            type of the data product, e.g. `NODDING_FRAME`, `Extr1D_PRIMARY`
+            type of the data product, e.g. `NOD_FRAME`, `Extr1D_PRIMARY`
 
         Returns
         -------
@@ -625,10 +632,14 @@ class CriresPipeline:
         plt.close(fig)
 
 
-    def _plot_extr_model(self, savename):
+    def _plot_extr2d_model(self, savename):
         self._set_plot_style()
-        D, P, V, id_det, id_order, chi2 = self._load_extr2D(savename+'.npz')
-        Ndet, Norder = chi2.shape[0], chi2.shape[1]
+        data = np.load(savename+'.npz')
+        D = data['data'][0]
+        P = data['data'][2]
+        id_det = data['id_det']
+        id_order = data['id_order']
+        Ndet, Norder = id_det.shape[0]+1, id_order.shape[1]+1
         fig, axes = plt.subplots(nrows=Norder*2, ncols=Ndet, 
                         figsize=(2*Norder, 14), sharex=True, sharey=True,  
                         constrained_layout=True)
@@ -647,8 +658,9 @@ class CriresPipeline:
                     vmin, vmax = np.percentile(data[~nans], (5, 95))
                     ax_d.imshow(data, vmin=vmin, vmax=vmax, aspect='auto')
                     ax_m.imshow(model, vmin=0, vmax=np.max(model), aspect='auto')
-                ax_d.set_title(r"Order {0}, $\chi_r^2$: {1:.2f}".format(
-                                        o//2, chi2[i, o//2]))
+                ax_d.set_title(f"Order {o//2}")
+                # ax_d.set_title(r"Order {0}, $\chi_r^2$: {1:.2f}".format(
+                #                         o//2, chi2[i, o//2]))
             axes[-1,i].set_xlabel(f"Detector {i}", size='large', fontweight='bold')
         axes[0,0].set_ylim((0, rows_crop))
         plt.savefig(savename+'.png')
@@ -710,7 +722,7 @@ class CriresPipeline:
             # Save the master dark, read-out noise, and bad-pixel maps
             file_name = os.path.join(self.calpath, 
                             f'DARK_MASTER_DIT{item}.fits')
-            su.wfits(file_name, ext_list={"FLUX": master}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": master}, header=hdr)
             self._add_to_calib(f'DARK_MASTER_DIT{item}.fits', 
                             "DARK_MASTER")
             self._plot_det_image(file_name, f"DARK_MASTER, DIT={item:.1f}",
@@ -718,13 +730,13 @@ class CriresPipeline:
             
             file_name = os.path.join(self.calpath, 
                             f'DARK_RON_DIT{item}.fits')
-            su.wfits(file_name, ext_list={"FLUX": rons}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": rons}, header=hdr)
             self._add_to_calib(f'DARK_RON_DIT{item}.fits', 
                             "DARK_RON")
 
             file_name = os.path.join(self.calpath, 
                             f'DARK_BPM_DIT{item}.fits')
-            su.wfits(file_name, ext_list={"FLUX": badpix.astype(int)}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": badpix.astype(int)}, header=hdr)
             self._add_to_calib(f'DARK_BPM_DIT{item}.fits', 
                             "DARK_BPM")
 
@@ -816,12 +828,12 @@ class CriresPipeline:
             # Save the master flat and bad-pixel map
             file_name = os.path.join(self.calpath, 
                             f'FLAT_MASTER_{item_wlen}.fits')
-            su.wfits(file_name, ext_list={"FLUX": master}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": master}, header=hdr)
             self._add_to_calib(f'FLAT_MASTER_{item_wlen}.fits', "FLAT_MASTER")
 
             file_name = os.path.join(self.calpath, 
                             f'FLAT_BPM_{item_wlen}.fits')
-            su.wfits(file_name, ext_list={"FLUX": badpix.astype(int)}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": badpix.astype(int)}, header=hdr)
             self._add_to_calib(f'FLAT_BPM_{item_wlen}.fits', 
                             "FLAT_BPM")
             
@@ -912,7 +924,7 @@ class CriresPipeline:
             # Save the polynomial coefficients
             print(f'testing this...')
             file_name = os.path.join(self.calpath, f'TW_FLAT_{item_wlen}.fits')
-            su.wfits(file_name, ext_list={"FLUX": trace}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": trace}, header=hdr)
             self._add_to_calib(f'TW_FLAT_{item_wlen}.fits', "TRACE_TW")
             
             self._plot_det_image(file_name, f"FLAT_MASTER_{item_wlen}", 
@@ -1039,7 +1051,7 @@ class CriresPipeline:
             # and an initial wavelength solution
             file_name = os.path.join(self.calpath, 
                             f'SLIT_TILT_{item_wlen}.fits')
-            su.wfits(file_name, ext_list={"FLUX": meta}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": meta}, header=hdr)
             self._add_to_calib(f'SLIT_TILT_{item_wlen}.fits', "SLIT_TILT")
 
             self._plot_det_image(file_name, f"FPET_{item_wlen}", 
@@ -1047,7 +1059,7 @@ class CriresPipeline:
 
             file_name = os.path.join(self.calpath, 
                             f'INIT_WLEN_{item_wlen}.fits')
-            su.wfits(file_name, ext_list={"WAVE": wlen}, header=hdr)
+            wfits(file_name, ext_list={"WAVE": wlen}, header=hdr)
             self._add_to_calib(f'INIT_WLEN_{item_wlen}.fits', "INIT_WLEN")
             
 
@@ -1114,18 +1126,18 @@ class CriresPipeline:
             print("\n Output files:")
             file_name = os.path.join(self.calpath, 
                                     f'FLAT_NORM_{item_wlen}.fits')
-            su.wfits(file_name, ext_list={"FLUX": flat_norm}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": flat_norm}, header=hdr)
             self._add_to_calib(f'FLAT_NORM_{item_wlen}.fits', "FLAT_NORM")
             self._plot_det_image(file_name, f"FLAT_NORM_{item_wlen}", 
                             flat_norm, tw=trace_update)
 
             file_name = os.path.join(self.calpath, f'BLAZE_{item_wlen}.fits')
-            su.wfits(file_name, ext_list={"FLUX": blazes}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": blazes}, header=hdr)
             self._add_to_calib(f'BLAZE_{item_wlen}.fits', "BLAZE")
             self._plot_spec_by_order(file_name, blazes) 
 
             file_name = os.path.join(self.calpath, f'TW_FLAT_{item_wlen}.fits')
-            su.wfits(file_name, ext_list={"FLUX": trace_update}, header=hdr)
+            wfits(file_name, ext_list={"FLUX": trace_update}, header=hdr)
         
             
 
@@ -1134,15 +1146,8 @@ class CriresPipeline:
         """
         Method for processing nodding frames. Apply AB pair subtraction,
         readout artifacts correction, and flat fielding.
-
-        Parameters
-        ----------
-        mode : str
-            Specify the way of sky background subtraction. If `mode='nod'`, it uses 
-            the two nodding positions to remove background. If `mode='stare'`,
-            the A and B nodding frames will be treated separately. By default, the 
-            code read from the data header to determine the mode. It is necessary 
-            to use this parameter only if one needs to force a specific mode.
+        If `obs_mode='nod'`, it subtracts the two nodding positions to remove sky background. 
+        If `obs_mode='stare'`, the A and B nodding frames will be treated separately. 
 
         Returns
         -------
@@ -1150,16 +1155,7 @@ class CriresPipeline:
             None
         """
 
-        self._print_section("Process nodding frames")
-
-        # Create the obs_nodding directory if it does not exist yet
-        self.noddingpath = os.path.join(self.outpath, "obs_nodding")
-        if not os.path.exists(self.noddingpath):
-            os.makedirs(self.noddingpath)
-
-        # initialize a Pool for parallel
-        pool = Pool(processes=self.num_processes)
-        pool_jobs = []
+        self._print_section(f"Process {self.obs_mode} frames")
 
         # Select the science observations
         indices = self.header_info[self.key_catg] == "SCIENCE"
@@ -1182,115 +1178,118 @@ class CriresPipeline:
         file_ron = self.calib_info[indices_ron][self.key_filename].iloc[0]
         ron = fits.getdata(os.path.join(self.calpath, file_ron))
 
-        # Loop over each target
-        for object in unique_target:
-            print(f"Processing target: {object}")
+        # initialize a Pool for parallel
+        with Pool(processes=self.num_processes) as pool:
+            pool_jobs = []
+            # Loop over each target
+            for object in unique_target:
+                print(f"Processing target: {object}")
 
-            indices_obj = indices & \
-                    (self.header_info[self.key_target_name] == object)
+                indices_obj = indices & \
+                        (self.header_info[self.key_target_name] == object)
 
-            # Check unique WLEN setting
-            unique_wlen = set()
-            for item in self.header_info[indices_obj][self.key_wlen]:
-                unique_wlen.add(item)
+                # Check unique WLEN setting
+                unique_wlen = set()
+                for item in self.header_info[indices_obj][self.key_wlen]:
+                    unique_wlen.add(item)
 
-            # Loop over each WLEN setting
-            for item_wlen in unique_wlen:
-                
-                indices_wlen = indices_obj & \
-                            (self.header_info[self.key_wlen] == item_wlen)
-                
-                # Check unique DIT
-                unique_dit = set()
-                for item in self.header_info[indices_wlen][self.key_DIT]:
-                    unique_dit.add(item)
+                # Loop over each WLEN setting
+                for item_wlen in unique_wlen:
+                    
+                    indices_wlen = indices_obj & \
+                                (self.header_info[self.key_wlen] == item_wlen)
+                    
+                    # Check unique DIT
+                    unique_dit = set()
+                    for item in self.header_info[indices_wlen][self.key_DIT]:
+                        unique_dit.add(item)
 
-                # Select the corresponding calibration files
-                indices_flat = (self.calib_info[self.key_caltype] == "FLAT_NORM") \
-                             & (self.calib_info[self.key_wlen] == item_wlen)
-                indices_bpm = (self.calib_info[self.key_caltype] == "FLAT_BPM") \
-                           & (self.calib_info[self.key_wlen] == item_wlen)
-                indices_tw = (self.calib_info[self.key_caltype] == "TRACE_TW") \
-                           & (self.calib_info[self.key_wlen] == item_wlen)
-                # indices_blaze = (self.calib_info[self.key_caltype] == "BLAZE") \
-                #                & (self.calib_info[self.key_wlen] == item_wlen)
-                indices_slit = (self.calib_info[self.key_caltype] == "SLIT_TILT") \
+                    # Select the corresponding calibration files
+                    indices_flat = (self.calib_info[self.key_caltype] == "FLAT_NORM") \
+                                & (self.calib_info[self.key_wlen] == item_wlen)
+                    indices_bpm = (self.calib_info[self.key_caltype] == "FLAT_BPM") \
                             & (self.calib_info[self.key_wlen] == item_wlen)
+                    indices_tw = (self.calib_info[self.key_caltype] == "TRACE_TW") \
+                            & (self.calib_info[self.key_wlen] == item_wlen)
+                    # indices_blaze = (self.calib_info[self.key_caltype] == "BLAZE") \
+                    #                & (self.calib_info[self.key_wlen] == item_wlen)
+                    indices_slit = (self.calib_info[self.key_caltype] == "SLIT_TILT") \
+                                & (self.calib_info[self.key_wlen] == item_wlen)
 
-                file = self.calib_info[indices_flat][self.key_filename].iloc[0]
-                flat = fits.getdata(os.path.join(self.calpath, file))
-                file = self.calib_info[indices_bpm][self.key_filename].iloc[0]
-                bpm = fits.getdata(os.path.join(self.calpath, file))
-                file = self.calib_info[indices_tw][self.key_filename].iloc[0]
-                tw = fits.getdata(os.path.join(self.calpath, file))
-                file = self.calib_info[indices_slit][self.key_filename].iloc[0]
-                slit = fits.getdata(os.path.join(self.calpath, file))
+                    file = self.calib_info[indices_flat][self.key_filename].iloc[0]
+                    flat = fits.getdata(os.path.join(self.calpath, file))
+                    file = self.calib_info[indices_bpm][self.key_filename].iloc[0]
+                    bpm = fits.getdata(os.path.join(self.calpath, file))
+                    file = self.calib_info[indices_tw][self.key_filename].iloc[0]
+                    tw = fits.getdata(os.path.join(self.calpath, file))
+                    file = self.calib_info[indices_slit][self.key_filename].iloc[0]
+                    slit = fits.getdata(os.path.join(self.calpath, file))
+                
+                    # Loop over each DIT
+                    for item_dit in unique_dit:
+                        print(f"Wavelength setting: {item_wlen}, "
+                            f"DIT value: {item_dit} s.")
+
+                        indices_nod_A = indices_wlen & \
+                                (self.header_info[self.key_DIT] == item_dit) & \
+                                (self.header_info[self.key_nodpos] == 'A')
+                        indices_nod_B = indices_wlen & \
+                                (self.header_info[self.key_DIT] == item_dit) & \
+                                (self.header_info[self.key_nodpos] == 'B')
+                        df_nods = self.header_info[indices_nod_A | indices_nod_B]\
+                                        .sort_values(self.key_filename)
+
+                        nod_a_count = sum(indices_nod_A)
+                        nod_b_count = sum(indices_nod_B)
+                        if nod_a_count == nod_b_count:
+                            print(f"Number of AB pairs: {nod_a_count}")
+                        else:
+                            print(f"Number of A and B files: {nod_a_count, nod_b_count}")
+
+                        if self.header_info[indices_nod_A][self.key_nabcycle].iloc[0] == 0 \
+                                            or self.obs_mode == 'STARE':
+                            # staring mode
+                            indices_dark = (self.calib_info[self.key_caltype] == "DARK_MASTER") \
+                                        & (self.calib_info[self.key_DIT] == item_dit)
+
+                            if np.sum(indices_dark) < 1:
+                                warnings.warn(f"No MASTER DARK frame found with the DIT value {item_dit}s corresponding to that of science data")
+                                self._download_archive("DARK", item_dit)
+                            
+                            indices_dark = (self.calib_info[self.key_caltype] == "DARK_MASTER") \
+                                        & (self.calib_info[self.key_DIT] == item_dit)
+                            file = self.calib_info[indices_dark][self.key_filename].iloc[0]
+                            dark = fits.getdata(os.path.join(self.calpath, file)) 
+
+                            indices_ron = (self.calib_info[self.key_caltype] == "DARK_RON") \
+                                        & (self.calib_info[self.key_DIT] == item_dit)
+                            file_ron = self.calib_info[indices_ron][self.key_filename].iloc[0]
+                            ron = fits.getdata(os.path.join(self.calpath, file_ron)) 
+                            
+                            for i in range(df_nods.shape[0]):
+                                filename = df_nods[self.key_filename].iloc[i]
+                                job = pool.apply_async(self._process_staring, 
+                                                    args=(filename, flat, bpm, 
+                                                        tw, dark, ron, object, item_wlen))
+                                pool_jobs.append(job)
+                        else:
+                            # nodding mode
+                            try:
+                                self.Nexp_per_nod = int(self.header_info[indices_nod_A]\
+                                            [self.key_nexp_per_nod].iloc[0])
+                            except:
+                                # Some headers missing the NEXP key
+                                self.Nexp_per_nod = int(nod_a_count//self.header_info[indices_nod_A][self.key_nabcycle].iloc[0])
+                            
+                            for i, row in enumerate(
+                                    range(0, df_nods.shape[0], self.Nexp_per_nod)):
+                                job = pool.apply_async(self._process_nodding, 
+                                                    args=(df_nods, i, row, flat, bpm, 
+                                                        tw, ron, object, item_wlen))
+                                pool_jobs.append(job)
             
-                # Loop over each DIT
-                for item_dit in unique_dit:
-                    print(f"Wavelength setting: {item_wlen}, "
-                          f"DIT value: {item_dit} s.")
-
-                    indices_nod_A = indices_wlen & \
-                            (self.header_info[self.key_DIT] == item_dit) & \
-                            (self.header_info[self.key_nodpos] == 'A')
-                    indices_nod_B = indices_wlen & \
-                            (self.header_info[self.key_DIT] == item_dit) & \
-                            (self.header_info[self.key_nodpos] == 'B')
-                    df_nods = self.header_info[indices_nod_A | indices_nod_B]\
-                                    .sort_values(self.key_filename)
-
-                    nod_a_count = sum(indices_nod_A)
-                    nod_b_count = sum(indices_nod_B)
-                    if nod_a_count == nod_b_count:
-                        print(f"Number of AB pairs: {nod_a_count}")
-                    else:
-                        print(f"Number of A and B files: {nod_a_count, nod_b_count}")
-
-                    if self.header_info[indices_nod_A][self.key_nabcycle].iloc[0] == 0 \
-                                        or mode == 'stare':
-                        # staring mode
-                        indices_dark = (self.calib_info[self.key_caltype] == "DARK_MASTER") \
-                                    & (self.calib_info[self.key_DIT] == item_dit)
-
-                        if np.sum(indices_dark) < 1:
-                            warnings.warn(f"No MASTER DARK frame found with the DIT value {item_dit}s corresponding to that of science data")
-                            self._download_archive("DARK", item_dit)
-                        
-                        indices_dark = (self.calib_info[self.key_caltype] == "DARK_MASTER") \
-                                    & (self.calib_info[self.key_DIT] == item_dit)
-                        file = self.calib_info[indices_dark][self.key_filename].iloc[0]
-                        dark = fits.getdata(os.path.join(self.calpath, file)) 
-
-                        indices_ron = (self.calib_info[self.key_caltype] == "DARK_RON") \
-                                    & (self.calib_info[self.key_DIT] == item_dit)
-                        file_ron = self.calib_info[indices_ron][self.key_filename].iloc[0]
-                        ron = fits.getdata(os.path.join(self.calpath, file_ron)) 
-                        
-                        for i in range(df_nods.shape[0]):
-                            filename = df_nods[self.key_filename].iloc[i]
-                            job = pool.apply_async(self._process_staring, 
-                                                args=(filename, flat, bpm, 
-                                                    tw, dark, ron, object, item_wlen))
-                            pool_jobs.append(job)
-                    else:
-                        # nodding mode
-                        try:
-                            self.Nexp_per_nod = int(self.header_info[indices_nod_A]\
-                                        [self.key_nexp_per_nod].iloc[0])
-                        except:
-                            # Some headers missing the NEXP key
-                            self.Nexp_per_nod = int(nod_a_count//self.header_info[indices_nod_A][self.key_nabcycle].iloc[0])
-                        
-                        for i, row in enumerate(
-                                range(0, df_nods.shape[0], self.Nexp_per_nod)):
-                            job = pool.apply_async(self._process_nodding, 
-                                                args=(df_nods, i, row, flat, bpm, 
-                                                    tw, ron, object, item_wlen))
-                            pool_jobs.append(job)
-        
-        for job in pool_jobs:
-            job.get() 
+            for job in pool_jobs:
+                job.get() 
 
 
     def _process_nodding(self, df_nods, i, row, flat, bpm, 
@@ -1384,20 +1383,18 @@ class CriresPipeline:
                                 frame_bkg_cor, err_bkg_cor, flat)
             
             file_s = file.split('_')[-1]
-            file_name = os.path.join(self.noddingpath, 
-                            "Nodding_"+ object.replace(" ", "") + \
+            file_name = os.path.join(self.nodpath, 
+                            f"{self.obs_mode}_"+ object.replace(" ", "") + \
                             f"_{item_wlen}_{file_s}")
-            su.wfits(file_name, ext_list={"FLUX": frame_bkg_cor, 
+            wfits(file_name, ext_list={"FLUX": frame_bkg_cor, 
                                 "FLUX_ERR": err_bkg_cor}, header=hdr)
 
             print(f"\nProcessed file {file_s} at nod position {pos}")
-            self._add_to_product("obs_nodding/Nodding_" + \
-                                object.replace(" ", "") + \
-                                f"_{item_wlen}_{file_s}", 
-                                "NODDING_FRAME")
+            self._add_to_product('/'.join(file_name.split('/')[-2:]), 
+                                f"{self.obs_mode}_FRAME")
             
             self._plot_det_image(file_name, 
-                        f"{object}_NODDING_FRAME_{item_wlen}", frame_bkg_cor)
+                        f"{object}_{self.obs_mode}_FRAME_{item_wlen}", frame_bkg_cor)
     
 
     def _process_staring(self, file, flat, bpm, tw, dark, ron, object, item_wlen):
@@ -1430,20 +1427,17 @@ class CriresPipeline:
                             frame_bkg_cor, err_bkg_cor, flat)
         
         file_s = file.split('_')[-1]
-        file_name = os.path.join(self.noddingpath, 
-                        "Nodding_"+ object.replace(" ", "") + \
+        file_name = os.path.join(self.nodpath, 
+                        f"{self.obs_mode}_"+ object.replace(" ", "") + \
                         f"_{item_wlen}_{file_s}")
-        su.wfits(file_name, ext_list={"FLUX": frame_bkg_cor, 
+        wfits(file_name, ext_list={"FLUX": frame_bkg_cor, 
                             "FLUX_ERR": err_bkg_cor}, header=hdr)
 
-        # print(f"\nProcessed file {file_s}")
-        self._add_to_product("obs_nodding/Nodding_" + \
-                            object.replace(" ", "") + \
-                            f"_{item_wlen}_{file_s}", 
-                            "NODDING_FRAME")
+        self._add_to_product('/'.join(file_name.split('/')[-2:]),  
+                            f"{self.obs_mode}_FRAME")
         
         self._plot_det_image(file_name, 
-                    f"{object}_NODDING_FRAME_{item_wlen}", frame_bkg_cor)
+                    f"{object}_{self.obs_mode}_FRAME_{item_wlen}", frame_bkg_cor)
     
 
     @print_runtime
@@ -1467,15 +1461,13 @@ class CriresPipeline:
         """
 
         self._print_section("Combine nodding frames")
-
-        self.noddingpath = os.path.join(self.outpath, "obs_nodding")
         
         self.product_info = pd.read_csv(self.product_file, sep=';')
         
         if combine_mode == 'weighted':
             print("Estimate SNR of individual exposures from extracted spectra:")
             savename = 'TMP'
-            self.obs_extract(caltype='NODDING_FRAME', savename=savename)
+            self.obs_extract(caltype=f"{self.obs_mode}_FRAME", savename=savename)
 
         # get updated product info
         self.product_info = pd.read_csv(self.product_file, sep=';')
@@ -1584,13 +1576,11 @@ class CriresPipeline:
                     
                     su.wfits(file_name, ext_list={"FLUX": combined, 
                                 "FLUX_ERR": combined_err}, header=hdr)
-                    self._add_to_product("obs_nodding/Combined_"+ \
-                            object.replace(" ", "") + \
-                            f"_{item_wlen}_Nodding_{pos}.fits", 
-                            "NODDING_COMBINED")
+                    self._add_to_product('/'.join(file_name.split('/')[-2:]), 
+                            f"{self.obs_mode}_COMBINED")
 
                     self._plot_det_image(file_name, 
-                        f"{object}_NODDING_{pos}_Combined_{item_wlen}", combined)
+                        f"{object}_{self.obs_mode}_{pos}_COMBINED_{item_wlen}", combined)
 
                     INT_total += hdr[self.key_DIT]*hdr[self.key_NDIT]*(j+1)/3600.
                 
@@ -1598,15 +1588,16 @@ class CriresPipeline:
 
 
     @print_runtime
-    def obs_extract(self, caltype='NODDING_COMBINED', 
+    def obs_extract(self, caltype='NOD_COMBINED', 
                           object=None,
                           savename='',
                           peak_frac=None, companion_sep=None, 
                           remove_star_bkg=False, 
-                          remove_sky_bkg = False,
+                          remove_sky_bkg=False, 
                           std_object=None,
-                          aper_prim=15, aper_comp=10, 
+                          aper_prim=20, aper_comp=10, 
                           extract_2d=False,
+                          extr_level=0.9,
                           debug=False):    
         """
         Method for extracting. Apply AB pair subtraction,
@@ -1632,12 +1623,12 @@ class CriresPipeline:
 
         self._print_section("Extract spectra")
 
+        if self.obs_mode == 'STARE':
+            remove_sky_bkg = True
+
         # get updated product info
         self.product_info = pd.read_csv(self.product_file, sep=';')
 
-        # initialize a Pool for parallel
-        pool = Pool(processes=self.num_processes)
-        pool_jobs = []
 
         # Select the type of observations we want to work with
         indices = (self.product_info[self.key_caltype] == caltype)
@@ -1653,79 +1644,79 @@ class CriresPipeline:
             assert object in unique_target, f'Target {object} not found in {unique_target}'
             unique_target = set([object])
 
-        # Loop over each target
-        for object in unique_target:
-            print(f"Processing target: {object} \n")
+        # initialize a Pool for parallel
+        with Pool(processes=self.num_processes) as pool:
+            pool_jobs = []
+            # Loop over each target
+            for object in unique_target:
+                print(f"Processing target: {object} \n")
 
-            indices_obj = indices & \
-                    (self.product_info[self.key_target_name] == object)
-            
-            if self.product_info[indices_obj][self.key_nabcycle].iloc[0] == 0:
-                # staring mode, need to remove sky background
-                remove_sky_bkg = True
+                indices_obj = indices & \
+                        (self.product_info[self.key_target_name] == object)
 
-            # Check unique WLEN setting
-            unique_wlen = set()
-            for item in self.product_info[indices_obj][self.key_wlen]:
-                unique_wlen.add(item)
+                # Check unique WLEN setting
+                unique_wlen = set()
+                for item in self.product_info[indices_obj][self.key_wlen]:
+                    unique_wlen.add(item)
 
-            # Loop over each WLEN setting
-            for item_wlen in unique_wlen:
-                # print(f"Wavelength setting: {item_wlen}")
+                # Loop over each WLEN setting
+                for item_wlen in unique_wlen:
+                    # print(f"Wavelength setting: {item_wlen}")
+                    
+                    indices_wlen = indices_obj & \
+                                (self.product_info[self.key_wlen] == item_wlen)
                 
-                indices_wlen = indices_obj & \
-                            (self.product_info[self.key_wlen] == item_wlen)
-            
-                # Select the corresponding calibration files
-                indices_blaze = (self.calib_info[self.key_caltype] == "BLAZE") \
-                              & (self.calib_info[self.key_wlen] == item_wlen)
-                indices_tw = (self.calib_info[self.key_caltype] == "TRACE_TW") \
-                           & (self.calib_info[self.key_wlen] == item_wlen)
-                indices_slit = (self.calib_info[self.key_caltype] == "SLIT_TILT") \
-                             & (self.calib_info[self.key_wlen] == item_wlen)
-                indices_bpm = (self.calib_info[self.key_caltype] == "FLAT_BPM") \
+                    # Select the corresponding calibration files
+                    indices_blaze = (self.calib_info[self.key_caltype] == "BLAZE") \
+                                & (self.calib_info[self.key_wlen] == item_wlen)
+                    indices_tw = (self.calib_info[self.key_caltype] == "TRACE_TW") \
                             & (self.calib_info[self.key_wlen] == item_wlen)
-                # indices_wave = (self.calib_info[self.key_caltype] == "INIT_WLEN") & \
-                #                (self.calib_info[self.key_wlen] == item_wlen)
+                    indices_slit = (self.calib_info[self.key_caltype] == "SLIT_TILT") \
+                                & (self.calib_info[self.key_wlen] == item_wlen)
+                    indices_bpm = (self.calib_info[self.key_caltype] == "FLAT_BPM") \
+                                & (self.calib_info[self.key_wlen] == item_wlen)
+                    # indices_wave = (self.calib_info[self.key_caltype] == "INIT_WLEN") & \
+                    #                (self.calib_info[self.key_wlen] == item_wlen)
 
-                file = self.calib_info[indices_bpm][self.key_filename].iloc[0]
-                bpm = fits.getdata(os.path.join(self.calpath, file))
-                file = self.calib_info[indices_tw][self.key_filename].iloc[0]
-                tw = fits.getdata(os.path.join(self.calpath, file))
-                file = self.calib_info[indices_slit][self.key_filename].iloc[0]
-                slit = fits.getdata(os.path.join(self.calpath, file))
-                file = self.calib_info[indices_blaze][self.key_filename].iloc[0]
-                blaze = fits.getdata(os.path.join(self.calpath, file))
+                    file = self.calib_info[indices_bpm][self.key_filename].iloc[0]
+                    bpm = fits.getdata(os.path.join(self.calpath, file))
+                    file = self.calib_info[indices_tw][self.key_filename].iloc[0]
+                    tw = fits.getdata(os.path.join(self.calpath, file))
+                    file = self.calib_info[indices_slit][self.key_filename].iloc[0]
+                    slit = fits.getdata(os.path.join(self.calpath, file))
+                    file = self.calib_info[indices_blaze][self.key_filename].iloc[0]
+                    blaze = fits.getdata(os.path.join(self.calpath, file))
 
-                
-                # Loop over each observation
-                if object == std_object:
-                    for file in self.product_info[indices_wlen][self.key_filename]:
-                        job = pool.apply_async(self._process_extraction, 
-                                            args=(file, bpm, tw, slit, blaze, 
-                                                peak_frac, aper_prim, aper_comp, 
-                                                None, False, False, 
-                                                remove_sky_bkg, 
-                                                savename, debug))
-                        pool_jobs.append(job)
-                else:
-                    for file in self.product_info[indices_wlen][self.key_filename]:
-                        job = pool.apply_async(self._process_extraction, 
-                                            args=(file, bpm, tw, slit, blaze, 
-                                                peak_frac, aper_prim, aper_comp, 
-                                                companion_sep, remove_star_bkg,
-                                                extract_2d, remove_sky_bkg, 
-                                                savename, debug))
-                        pool_jobs.append(job)
-        
-        for job in pool_jobs:
-            job.get() 
+                    
+                    # Loop over each observation
+                    if object == std_object:
+                        for file in self.product_info[indices_wlen][self.key_filename]:
+                            job = pool.apply_async(self._process_extraction, 
+                                                args=(file, bpm, tw, slit, blaze, 
+                                                    peak_frac, aper_prim, aper_comp, 
+                                                    None, False, False, 
+                                                    remove_sky_bkg, extr_level,
+                                                    savename, debug))
+                            pool_jobs.append(job)
+                    else:
+                        for file in self.product_info[indices_wlen][self.key_filename]:
+                            job = pool.apply_async(self._process_extraction, 
+                                                args=(file, bpm, tw, slit, blaze, 
+                                                    peak_frac, aper_prim, aper_comp, 
+                                                    companion_sep, remove_star_bkg,
+                                                    extract_2d, remove_sky_bkg, extr_level,
+                                                    savename, debug))
+                            pool_jobs.append(job)
+            
+            for job in pool_jobs:
+                job.get() 
 
     def _process_extraction(self, file, bpm, tw, slit, blaze, 
                             peak_frac, aper_prim, aper_comp, 
                             companion_sep, remove_star_bkg, 
-                            extract_2d, remove_sky_bkg, 
+                            extract_2d, remove_sky_bkg, extr_level,
                             savename, debug):
+        
         with fits.open(os.path.join(self.outpath, file)) as hdu:
             hdr = hdu[0].header
             dt = hdu["FLUX"].data
@@ -1745,8 +1736,10 @@ class CriresPipeline:
                         dt, dt_err, bpm, tw, slit, blaze, blaze, 
                         self.gain, NDIT=ndit, extract_2d=extract_2d,
                         cen0=f0, remove_sky_bkg=remove_sky_bkg, 
+                        remove_star_bkg=remove_star_bkg,
+                        extr_level=extr_level,
                         aper_half=aper_prim, debug=debug)
-        flux_pri, err_pri, D, P, V, id_order, chi2_r = result
+        flux_pri, err_pri, D, V, P = result
 
         #estimate snr of the primary spectra at the middle order
         mid_order = len(flux_pri[0])//2
@@ -1759,8 +1752,7 @@ class CriresPipeline:
         paths = file.split('/')
         paths[-1] = '_'.join(['Extr1D_PRIMARY', savename, paths[-1]])
         filename = os.path.join(self.outpath, '/'.join(paths))
-        su.wfits(filename, ext_list={"FLUX": flux_pri, 
-                                "FLUX_ERR": err_pri}, header=hdr)
+        wfits(filename, ext_list={"FLUX": flux_pri, "FLUX_ERR": err_pri}, header=hdr)
         if savename == '':
             self._add_to_product('/'.join(paths), 'Extr1D_PRIMARY', snr_mid)
         else:
@@ -1771,12 +1763,15 @@ class CriresPipeline:
             paths = file.split('/')
             paths[-1] =  '_'.join(['Extr2D_PRIMARY', savename, paths[-1][:-5]])
             filename2d = os.path.join(self.outpath, '/'.join(paths))
-            self._save_extr2D(filename2d, D, P, V, id_order, chi2_r)
+
+            extr2d = DETECTOR(data=[D, V, P], fields=['flux', 'var', 'psf'])
+            extr2d.save_extr2d(filename2d)
+            extr2d.plot_extr2d_model(filename2d)
+
             if savename == '':
                 self._add_to_product('/'.join(paths)+'.npz', 'Extr2D_PRIMARY')
             else:
                 self._add_to_product('/'.join(paths)+'.npz', '_'.join(['Extr2D_PRIMARY', savename]))
-            self._plot_extr_model(filename2d)
 
         if not companion_sep is None:
 
@@ -1790,13 +1785,14 @@ class CriresPipeline:
                             aper_half=aper_comp, 
                             remove_sky_bkg=remove_sky_bkg, 
                             remove_star_bkg=remove_star_bkg,
+                            extr_level=extr_level,
                             debug=debug)
-            flux_sec, err_sec, D, P, V, id_order, chi2_r = result
+            flux_sec, err_sec, D, V, P, ind_order = result
 
             paths = file.split('/')
             paths[-1] = '_'.join(['Extr1D_SECONDARY', savename, paths[-1]])
             filename = os.path.join(self.outpath, '/'.join(paths))
-            su.wfits(filename, ext_list={"FLUX": flux_sec, 
+            wfits(filename, ext_list={"FLUX": flux_sec, 
                                     "FLUX_ERR": err_sec}, header=hdr)
             if savename == '':
                 self._add_to_product('/'.join(paths), 'Extr1D_SECONDARY')
@@ -1807,39 +1803,20 @@ class CriresPipeline:
             paths = file.split('/')
             paths[-1] = '_'.join(['Extr2D_SECONDARY', savename, paths[-1][:-5]])
             filename2d = os.path.join(self.outpath, '/'.join(paths))
-            self._save_extr2D(filename2d, D, P, V, id_order, chi2_r)
+            
+            xtr2d = DETECTOR(data=[D, V, P], fields=['flux', 'var', 'psf'])
+            extr2d.save_extr2d(filename2d)
+            extr2d.plot_extr2d_model(filename2d)
+
             if savename == '':
                 self._add_to_product('/'.join(paths)+'.npz', 'Extr2D_SECONDARY')
             else:
                 self._add_to_product('/'.join(paths)+'.npz', '_'.join(['Extr2D_SECONDARY', savename]))
-            self._plot_extr_model(filename2d)
-
-
-    def _save_extr2D(self, filename, *ragged_list):
-        D, P, V, id_order, chi2 = ragged_list
-        D_stack, id_det = su.stack_ragged(D)
-        P_stack, id_det = su.stack_ragged(P)
-        V_stack, id_det = su.stack_ragged(V)
-        np.savez(filename, FLUX=D_stack, FLUX_ERR=V_stack,
-                        MODEL=P_stack, id_det=id_det, id_order=id_order,
-                        chi2=chi2)
-
-    def _load_extr2D(self, filename):
-        data = np.load(filename)
-        D = data['FLUX']
-        V = data['FLUX_ERR']
-        P = data['MODEL']
-        id_det = data['id_det']
-        id_order = data['id_order']
-        chi2 = data['chi2']
-        return D, P, V, id_det, id_order, chi2
+    
 
 
     @print_runtime
-    def refine_wlen_solution(self, run_skycalc=True, 
-                            data_type='Extr1D_PRIMARY', 
-                            object=None,
-                            debug=False):
+    def refine_wlen_solution(self, run_skycalc=True, debug=False):
         """
         Method for refining wavelength solution by manimizing 
         chi2 between the spectrum and the telluric transmission
@@ -1849,21 +1826,13 @@ class CriresPipeline:
         ----------
         run_skycalc: bool
             Whether to run ESO's skycalc to generate the telluric 
-            transmission model.
-        data_type: str
-            Label of the file type to worked on.
-            The default value is `Extr1D_PRIMARY`.
-        object: str
-            The name of the standard star whose spectra is used for
-            the wavelength solution optmization. If the target has
-            low S/N (<10) and there is no available standard star, 
-            set it to `None` and the refinement will not be performed. 
+            transmission model
         mode: str
             If mode is `linear`, then the wavelength solution is 
             corrected with a linear function. If mode is `quad`,
             the correction is a quadratic function.
         debug : bool
-            generate plots for debugging.
+            print polynomial fit coefficients.
 
         -------
         NoneType
@@ -1880,8 +1849,8 @@ class CriresPipeline:
         # get updated product info
         self.product_info = pd.read_csv(self.product_file, sep=';')
 
+        indices = (self.product_info[self.key_caltype] == 'Extr1D_PRIMARY') 
 
-        indices = (self.product_info[self.key_caltype] == data_type) 
         # Check unique WLEN setting
         unique_wlen = set()
         for item in self.product_info[indices][self.key_wlen]:
@@ -1894,6 +1863,7 @@ class CriresPipeline:
         indices_tellu = (self.calib_info[self.key_caltype] == "TELLU_SKYCALC") 
         if np.sum(indices_tellu) < 1:
             raise Exception("No Telluric transmission model found. Please set `run_skycalc` to `True`.") 
+        
         file = self.calib_info[indices_tellu][self.key_filename].iloc[0]
         tellu = fits.getdata(os.path.join(self.calpath, file))
 
@@ -1908,32 +1878,36 @@ class CriresPipeline:
             
             indices_wlen = indices & \
                           (self.product_info[self.key_wlen] == item_wlen)
-            if object is not None:
-                indices_wlen = indices_wlen & \
-                        (self.product_info[self.key_target_name] == object)
-                if sum(indices_wlen) == 0:
-                    raise Exception(f"Extr1D data of {object} are not found in products")
+            
+            unique_target = set()
+            for item in self.product_info[indices_wlen][self.key_target_name]:
+                unique_target.add(item)
 
-            dt, dt_err = [], []
-            # sum available spectra 
-            for file in self.product_info[indices_wlen][self.key_filename]:
-                with fits.open(os.path.join(self.outpath, file)) as hdu:
-                    dt.append(hdu["FLUX"].data)
-                    dt_err.append(hdu["FLUX_ERR"].data)
-            dt, dt_err = su.combine_frames(dt, dt_err, collapse='sum')
+            for target in unique_target:
+                # select available data of the target
+                indices_obj = indices_wlen & \
+                            (self.product_info[self.key_target_name] == target)
+                dt, dt_err = [], []
+                for file in self.product_info[indices_obj][self.key_filename]:
+                    with fits.open(os.path.join(self.outpath, file)) as hdu:
+                        dt.append(hdu["FLUX"].data)
+                        dt_err.append(hdu["FLUX_ERR"].data)
+                # sum available spectra 
+                dt, dt_err = su.combine_frames(dt, dt_err, collapse='sum')
 
-            wlen_cal = self._loop_over_detector(su.wlen_solution, True,
-                        dt, dt_err, wlen_init, transm_spec=tellu, 
-                        debug=debug)
+                wlen_cal = self._loop_over_detector(su.wlen_solution, True,
+                            dt, dt_err, wlen_init, transm_spec=tellu, 
+                            debug=debug)
 
-            # print("\n Output files:")
-            file_name = os.path.join(self.corrpath, f'WLEN_{item_wlen}.fits')
-            su.wfits(file_name, ext_list={"WAVE": wlen_cal}, header=hdr)
-            self._add_to_product(f'obs_calibrated/WLEN_{item_wlen}.fits', 
-                        "CAL_WLEN")
+                file_name = os.path.join(self.calpath, f'WLEN_{item_wlen}_' \
+                                        + '_'.join(target.split())+'.fits')
+                hdr[self.key_target_name] = target
+                wfits(file_name, ext_list={"WAVE": wlen_cal}, header=hdr)
+                self._add_to_calib(f'WLEN_{item_wlen}_' \
+                                    + '_'.join(target.split())+'.fits', "CAL_WLEN")
 
-            self._plot_spec_by_order(file_name, dt, wlen_cal, 
-                                    transm_spec=tellu, show=debug)
+                self._plot_spec_by_order(file_name, dt, wlen_cal, 
+                                        transm_spec=tellu, show=debug)
         
 
     def save_extracted_data(self, combine=False, object=None):
@@ -1958,7 +1932,9 @@ class CriresPipeline:
         # get updated product info
         self.product_info = pd.read_csv(self.product_file, sep=';')
 
-        data_type = ['Extr1D_PRIMARY', 'Extr1D_SECONDARY']
+        # get labels containing 'Extr1D'
+        all_labels = self.product_info[self.key_caltype].unique()
+        data_type = all_labels[pd.Series(all_labels).str.contains('Extr1D', case=False)]
 
         for label in data_type:
             indices = (self.product_info[self.key_caltype] == label)
@@ -1973,11 +1949,12 @@ class CriresPipeline:
 
             if len(unique_target) == 0:
                 continue
+            
             # Loop over each target
-            for object in unique_target:
+            for target in unique_target:
                 
                 indices_obj = indices & \
-                    (self.product_info[self.key_target_name] == object)
+                    (self.product_info[self.key_target_name] == target)
 
                 # Check unique WLEN setting
                 unique_wlen = set()
@@ -1992,18 +1969,26 @@ class CriresPipeline:
                             (self.product_info[self.key_wlen] == item_wlen)
 
                     indices_wave = \
-                        (self.product_info[self.key_caltype] == "CAL_WLEN")\
-                      & (self.product_info[self.key_wlen] == item_wlen)
+                          (self.calib_info[self.key_caltype] == "CAL_WLEN")\
+                        & (self.calib_info[self.key_wlen] == item_wlen) \
+                        & (self.calib_info[self.key_target_name] == target)
                     
                     if not np.any(indices_wave):
+                        print("No matching wavelength solution to the target .\n")
+                        print("The wavelength solution derived from other target is used.\n")
                         indices_wave = \
-                            (self.calib_info[self.key_caltype] == "INIT_WLEN") \
-                          & (self.calib_info[self.key_wlen] == item_wlen)
-                        file = self.calib_info[indices_wave][self.key_filename].iloc[0]
-                        wlen = fits.getdata(os.path.join(self.calpath, file))
-                    else:
-                        file = self.product_info[indices_wave][self.key_filename].iloc[0]
-                        wlen = fits.getdata(os.path.join(self.outpath, file))
+                                (self.calib_info[self.key_caltype] == "CAL_WLEN")\
+                                & (self.calib_info[self.key_wlen] == item_wlen)
+                        
+                        if not np.any(indices_wave):
+                            print("No calibrated wavelength solution available.\n")
+                            print("Initial wavelength solution is used.\n")
+                            indices_wave = \
+                                    (self.calib_info[self.key_caltype] == "INIT_WLEN") \
+                                    & (self.calib_info[self.key_wlen] == item_wlen)
+                        
+                    file = self.calib_info[indices_wave][self.key_filename].iloc[0]
+                    wlen = fits.getdata(os.path.join(self.calpath, file))
                     wlens.append(wlen)
 
                     dt, dt_err, airmass = [], [], []
@@ -2053,27 +2038,27 @@ class CriresPipeline:
                 hdr[self.key_airmass] = airmass[-1]
                 l = label.split('_')[-1]
                 file_name = os.path.join(self.corrpath, 
-                            object.replace(" ", "") +\
-                            f'_{l}_CRIRES_SPEC2D.fits')
-                su.wfits(file_name, ext_list={"FLUX": spec_series, 
+                            target.replace(" ", "") +\
+                            f'_{l}_CRIRES_SPEC1D.fits')
+                wfits(file_name, ext_list={"FLUX": spec_series, 
                                               "FLUX_ERR": err_series,
                                               "WAVE": wlens}, 
                                     header=hdr)
                 self._add_to_product("obs_calibrated/" +\
-                                    object.replace(" ", "") +\
-                                    f'_{l}_CRIRES_SPEC2D.fits', 
+                                    target.replace(" ", "") +\
+                                    f'_{l}_CRIRES_SPEC1D.fits', 
                                      f"SPEC_{l}")
                 
                 if isinstance(snr_mid, float):
-                    print(f"Saved target {object} {l} with wavelength coverage {unique_wlen}; ",
+                    print(f"Saved target {target} {l} with wavelength coverage {unique_wlen}; ",
                             f"average S/N ~ {snr_mid:.0f}. \n")
                 else:
-                    print(f"Saved target {object} {l} with wavelength coverage {unique_wlen}; average S/N ~ ",
+                    print(f"Saved target {target} {l} with wavelength coverage {unique_wlen}; average S/N ~ ",
                             np.round(snr_mid).astype(int), " \n")
 
 
                 if combine:
-                    result = SPEC2D(wlen=wlens, flux=spec_series, err=err_series)
+                    result = SPEC(wlen=wlens, flux=spec_series, err=err_series)
                     result.save_spec1d(file_name[:-4]+'dat')
                     result.plot_spec1d(file_name[:-4]+'png') #FIXME: XIO:  fatal IO error 25 (Inappropriate ioctl for device) on X server ":0"
 
@@ -2178,15 +2163,15 @@ class CriresPipeline:
         trans = su.SpecConvolve(wave.value, trans, 
                         out_res=spec_res, in_res=sky_calc["wres"])
 
-        transm_spec = np.column_stack((1e3 * wave.value, trans))
+        transm_spec = np.column_stack((wave.value, trans))
         out_file= os.path.join(self.calpath, "TRANSM_SPEC.fits")
-        su.wfits(out_file, ext_list={"FLUX": transm_spec})
+        wfits(out_file, ext_list={"FLUX": transm_spec})
         self._add_to_calib('TRANSM_SPEC.fits', "TELLU_SKYCALC")
 
 
     @print_runtime
     def run_molecfit(self, data_type=None, object=None,
-                        wave_range=None, verbose=False) -> None:
+                        wave_range=None, verbose=True) -> None:
         """
         Method for running ESO's tool for telluric correction 
         `Molecfit`. 
@@ -2233,11 +2218,11 @@ class CriresPipeline:
                 (self.product_info[indices][self.key_target_name] == object)
 
         science_file = self.product_info[indices][self.key_filename].iloc[0]
-        dt = SPEC2D(filename=os.path.join(self.outpath, science_file))
+        dt = SPEC(filename=os.path.join(self.outpath, science_file))
         dt.wlen *= 1e-3
 
         su.molecfit(self.molpath, dt, wave_range, 
-                    savename=science_file.split('/')[-1], verbose=True)
+                    savename=science_file.split('/')[-1], verbose=verbose)
 
         self._add_to_product('molecfit/TELLURIC_DATA.dat', "TELLU_MOLECFIT")
 
@@ -2299,7 +2284,6 @@ class CriresPipeline:
 
     def run_recipes(self, combine=False,
                     combine_mode='mean',
-                    obs_mode=None,
                     savename='',
                     companion_sep=None, 
                     remove_star_bkg=False, 
@@ -2330,16 +2314,14 @@ class CriresPipeline:
         self.cal_flat_trace()
         self.cal_slit_curve()
         self.cal_flat_norm()
-        self.obs_nodding(mode=obs_mode)
+        self.obs_nodding()
 
         if combine:
-            self.obs_nodding_combine(combine_mode=combine_mode)
-            input_type = 'NODDING_COMBINED'
+            self.obs_nodding_combine(
+                                     combine_mode=combine_mode)
+            input_type = f'{self.obs_mode}_COMBINED'
         else:
-            input_type = 'NODDING_FRAME'
-
-        if obs_mode == 'stare':
-            remove_sky_bkg = True
+            input_type = f'{self.obs_mode}_FRAME'
 
         self.obs_extract(
                         caltype=input_type,
@@ -2347,7 +2329,6 @@ class CriresPipeline:
                         aper_comp=aper_comp,
                         companion_sep=companion_sep, 
                         remove_star_bkg=remove_star_bkg,
-                        remove_sky_bkg=remove_sky_bkg, 
                         extract_2d=extract_2d,
                         std_object=std_object,
                         debug=debug,
@@ -2365,7 +2346,6 @@ class CriresPipeline:
 
     def preprocessing(self, combine=False, 
                       combine_mode='mean',
-                      obs_mode=None,
                       ):
         """
         Method for running the full chain of recipes.
@@ -2388,7 +2368,7 @@ class CriresPipeline:
         self.cal_flat_trace()
         self.cal_slit_curve()
         self.cal_flat_norm()
-        self.obs_nodding(mode=obs_mode)
+        self.obs_nodding()
 
         if combine:
             self.obs_nodding_combine(combine_mode=combine_mode)

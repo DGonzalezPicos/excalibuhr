@@ -16,32 +16,6 @@ import shutil
 import subprocess
 
 
-def wfits(fname, ext_list: dict, header=None):
-    """
-    write data to FITS primary and extensions, overwriting any old file
-    
-    Parameters
-    ----------
-    fname: str
-        path and filename to which the data is saved 
-    ext_list: dict
-        to save the data in the dictionary to FITS extension. Specify the datatype 
-        (e.g.  "FLUX", "FLUX_ERR", "WAVE", and "MODEL") in the key. 
-    header: FITS `header`
-        header information to be saved
-
-    Returns
-    -------
-    NoneType
-        None
-    """
-
-    primary_hdu = fits.PrimaryHDU(header=header)
-    new_hdul = fits.HDUList([primary_hdu])
-    if not ext_list is None:
-        for key, value in ext_list.items():
-            new_hdul.append(fits.ImageHDU(value, name=key))
-    new_hdul.writeto(fname, overwrite=True, output_verify='ignore') 
 
 def CCF_doppler(w_obs, f_obs, w_model, f_model, v_extent, dv):
     c = 2.99792458e5 #km/s
@@ -986,7 +960,9 @@ def spectral_rectify_interp(im_list, badpix, trace, slit_meta, reverse=False, de
         # ax1.imshow(im_rect_spec[0, yy_grid, :], vmin=0, vmax=100)
         # ax2.imshow(bpm[yy_grid])
         # plt.show()
-        med = np.nanmedian(im_rect_spec[0, yy_grid], axis=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            med = np.nanmedian(im_rect_spec[0, yy_grid], axis=0)
 
         # Loop over each row in the order
         for i, (x_isowlen, mask) in enumerate(zip(isowlen_grid, 
@@ -1439,6 +1415,7 @@ def extract_spec(det, det_err, badpix, trace, slit, blaze, spec_star,
                     gain, NDIT=1, cen0=90, companion_sep=None, aper_half=20, 
                     extract_2d=False, 
                     remove_star_bkg=False, remove_sky_bkg=False, 
+                    extr_level=0.9,
                     debug=False):
     """
     Extract 1D spectra from detector images
@@ -1496,7 +1473,6 @@ def extract_spec(det, det_err, badpix, trace, slit, blaze, spec_star,
     chi2: array
         reduced chi2 of the model (for diagnositic purposes)
     """
-
     # Correct for the slit curvature and trace curvature
     im = spectral_rectify_interp(det, badpix, trace, slit, debug=False)
     im_err = spectral_rectify_interp(det_err, badpix, trace, slit, debug=False)
@@ -1531,11 +1507,12 @@ def extract_spec(det, det_err, badpix, trace, slit, blaze, spec_star,
         profile[-N_edge:] = 0.
         obj_cen = np.argmax(profile)
 
+
     # Pixel-location of the companion target
     if companion_sep is not None:
         obj2_cen = obj_cen - companion_sep
 
-    flux, err, D, P, V, chi2 = [],[],[],[],[],[]
+    flux, err, D, P, V = [],[],[],[],[]
     for o, (im_sub, im_err_sub, bpm_sub) in enumerate(zip(im_subs, im_err_subs, bpm_subs)):
         
         if remove_sky_bkg:
@@ -1546,11 +1523,11 @@ def extract_spec(det, det_err, badpix, trace, slit, blaze, spec_star,
                                 debug=debug)
         
         # remove starlight contamination
-        if remove_star_bkg and companion_sep is not None:
-            im_sub, im_err_sub = remove_starlight(im_sub, im_err_sub**2, 
-                            spec_star[o]/blaze[o], cen0, cen0-companion_sep, 
-                            gain=gain, debug=debug)
-            aper_half = 5
+        # if remove_star_bkg and companion_sep is not None:
+        #     im_sub, im_err_sub = remove_starlight(im_sub, im_err_sub**2, 
+        #                     spec_star[o]/blaze[o], cen0, cen0-companion_sep, 
+        #                     gain=gain, debug=debug)
+        #     aper_half = 5
 
         if companion_sep is None:
             center = obj_cen
@@ -1559,32 +1536,35 @@ def extract_spec(det, det_err, badpix, trace, slit, blaze, spec_star,
             center = obj2_cen
 
         # Extract a 1D spectrum using the optimal extraction algorithm
-        f_opt, f_err, D_sub, P_sub, V_sub, chi2_r = optimal_extraction(
+        f_opt, f_err, D_sub, V_sub, P_sub = optimal_extraction(
                                 im_sub.T, im_err_sub.T**2, bpm_sub.T, 
                                 obj_cen=int(np.round(center)), 
                                 aper_half=aper_half, 
                                 filter_mode=filter_mode,
+                                remove_bkg=remove_star_bkg,
+                                extr_level=extr_level,
                                 gain=gain, NDIT=NDIT, debug=debug) 
 
         flux.append(f_opt/blaze[o])
         err.append(f_err/blaze[o])
         D.append(D_sub)
-        P.append(P_sub)
         V.append(V_sub)
-        chi2.append(chi2_r)
+        P.append(P_sub)
+        # chi2.append(chi2_r)
 
-    D_stack, id_order = stack_ragged(D)
-    P_stack, id_order = stack_ragged(P)
-    V_stack, id_order = stack_ragged(V)
+    # D_stack, id_order = stack_ragged(D)
+    # P_stack, id_order = stack_ragged(P)
+    # V_stack, id_order = stack_ragged(V)
 
-    return flux, err, D_stack, P_stack, V_stack, id_order, chi2 
+    return flux, err, D, V, P #D_stack, V_stack, P_stack, id_order 
 
 
 def optimal_extraction(D_full, V_full, bpm_full, obj_cen, 
                        aper_half=20, filter_mode='poly',
                        badpix_clip=5, filter_width=121,
-                       max_iter=30, extr_level=0.95, 
-                       gain=2., NDIT=1., etol=1e-6, debug=False):
+                       max_iter=30, extr_level=0.9, 
+                       remove_bkg=False, etol=1e-6, 
+                       gain=2., NDIT=1., debug=False):
     """
     Optimal extraction based on Horne(1986).
 
@@ -1620,6 +1600,16 @@ def optimal_extraction(D_full, V_full, bpm_full, obj_cen,
         modeled slit function and reduced chi2 of the model (for plotting)
     """
 
+    # determine object center from the data
+    profile = np.nanmedian(D_full, axis=0)
+    # plt.plot(profile)
+    profile[:obj_cen-4] = -np.inf
+    profile[obj_cen+4:] = -np.inf
+    # print(obj_cen)
+    obj_cen = np.argmax(profile) 
+    # print(obj_cen)
+    # plt.plot(profile)
+    # plt.show()
 
     D = D_full[:,obj_cen-aper_half:obj_cen+aper_half+1] # Observation
     V = V_full[:,obj_cen-aper_half:obj_cen+aper_half+1] # Variance
@@ -1639,7 +1629,33 @@ def optimal_extraction(D_full, V_full, bpm_full, obj_cen,
     spatial_x = np.arange(D.shape[1])
     D_norm = np.zeros_like(D)
 
-    # simple sum collapse to a 1D spectrum
+    # fit and remove bkg per wavelength channel
+    if remove_bkg == True:
+        
+        aper_mask = 6
+        bkg_poly_order = 6
+        cen0 = len(spatial_x)//2
+        mask = (spatial_x > cen0 - aper_mask) & (spatial_x < cen0 + aper_mask)
+        bkg_model = np.zeros_like(D)
+        for x in wave_x:
+            y_model, _, _ = PolyfitClip(spatial_x, D[x], order=bkg_poly_order, mask=~mask)
+            bkg_model[x] = y_model
+            # plt.plot(spatial_x, D[x])
+            # plt.plot(spatial_x[mask], D[x, mask])
+            # plt.plot(spatial_x, y_model)
+            # # plt.plot(spatial_x[~mask], D_poly)
+            # plt.show()
+        # plt.imshow(bkg_model, aspect='auto', vmin=-5, vmax=10)
+        # plt.show()
+        # plt.imshow(D-bkg_model, aspect='auto', vmin=0, vmax=50)
+        # plt.show()
+        D -= bkg_model
+        V_new += np.abs(bkg_model) / gain / NDIT
+
+        # profile = np.nanmedian(D, axis=0)
+        # plt.plot(profile)
+
+    # simple sum collapse to a 1D spectrum (box extraction)
     f_std = np.nansum(D*np.logical_not(bpm).astype(float), axis=1)
 
     # Normalize the image per spatial row with the simple 1D spectrum
@@ -1686,67 +1702,58 @@ def optimal_extraction(D_full, V_full, bpm_full, obj_cen,
             P[:, indice[ind]:] = etol
         elif ind == len(indice):
             P[:, :indice[-1]+1] = etol
-    
+
     # Normalize the spatial profile per wavelength channel
     for w in wave_x:
         P[w] /= np.sum(P[w])
 
-    # determine the extraction aperture by including 95% flux
-    cdf = np.cumsum(psf)     
-    extr_aper = (cdf > (1.-extr_level)/2.) & (cdf < (1.+extr_level)/2.)
-    extr_aper_not = (cdf < (1.-extr_level)/2.) | (cdf > (1.+extr_level)/2.)
-    D[:, extr_aper_not] = 0.
-    V[:, extr_aper_not] = 1./etol
-    P[:, extr_aper_not] = etol
-    P[P==0] = etol
-    # if debug:
-    #     plt.plot(cdf)
-    #     plt.show()
-    # if debug:
-    #     plt.imshow(P, aspect='auto')
-    #     plt.show()
+    # bad pixel map with good pixels = 1 and bad pxiels = 0.
+    M_bp = np.ones_like(D, dtype=bool)
 
-    # mask bad pixels
-    M_bp = np.ones_like(np.logical_not(bpm))
-    M_bp[:, extr_aper_not] = False
-    M_bp[:10, :] = False
-    M_bp[-10:, :] = False
-    norm_filtered = stats.sigma_clip((D/P)[:,extr_aper], sigma=3, axis=1)
-    M_bp[:, extr_aper] &= np.logical_not(norm_filtered.mask)
+    if extr_level is not None:
+        psf = np.mean(P, axis=0)
+        # determine the extraction aperture by including 95% flux
+        cdf = np.cumsum(psf)     
+        extr_aper = (cdf > (1.-extr_level)/2.) & (cdf < (1.+extr_level)/2.)
+        extr_aper_not = (cdf < (1.-extr_level)/2.) | (cdf > (1.+extr_level)/2.)
+        # D[:, extr_aper_not] = 0.
+        V[:, extr_aper_not] = 1./etol
+        P[:, extr_aper_not] = etol
+        P[P==0] = etol
+        # if debug:
+        #     plt.plot(cdf)
+        #     plt.show()
+        # if debug:
+        #     plt.imshow(P, aspect='auto')
+        #     plt.show()
+        psf = np.mean(P, axis=0)
 
-    f_opt = np.sum(M_bp*P*D/V_new, axis=1) / (np.sum(M_bp*P*P/V_new, axis=1) + etol)
-    V_new = V + np.abs(P*np.tile(f_opt, (P.shape[1],1)).T) / gain / NDIT
-    var = 1. / (np.sum(M_bp*P*P/V_new, axis=1)+etol)
-    snr = np.nanmedian(f_opt/np.sqrt(var))
-    # print(snr)
+        # plt.plot(psf*np.sum(profile))
+        # plt.show()
 
-    # if debug:
-    #     fig, axes = plt.subplots(ncols=2, sharey=True)
-    #     axes[0].imshow(D/P, vmin=0, vmax=8e4, aspect='auto')
-    #     axes[1].imshow(M_bp, aspect='auto')
-    #     plt.show()
+        # mask bad pixels
+        M_bp[:, extr_aper_not] = False
+        norm_filtered = stats.sigma_clip((D/P)[:,extr_aper], sigma=3, axis=1)
+        M_bp[:, extr_aper] &= np.logical_not(norm_filtered.mask)
+
 
     if debug:
         plt.plot(f_std)
-        plt.plot(f_opt)
-        # plt.show()
 
     for ite in range(max_iter):
 
+        f_opt = np.sum(M_bp*P*D, axis=1) / (np.sum(M_bp*P*P, axis=1) + etol)
+        V_new = V + np.abs(P*f_opt[:,None]) / gain / NDIT
         # Residual of optimally extracted spectrum and the observation
-        Res = M_bp * (D - P*np.tile(f_opt, (P.shape[1],1)).T)**2/V_new
-        
-        # dirty fix to the issues of rejecting good pixels for bright sources
-        if snr > 200:
-            Res /= 4.
+        Res = M_bp * (D - P*f_opt[:,None])**2/V_new
 
+        # to avoid the Residuals driven by the bad pxiels.
         good_channels = np.all(Res<badpix_clip**2, axis=1)
         f_prox = interp1d(wave_x[good_channels], f_opt[good_channels], 
                     kind='cubic', bounds_error=False, fill_value=0.)(wave_x)
-        Res = M_bp * (D - P*np.tile(f_prox, (P.shape[1],1)).T)**2/V_new
-        if snr > 200:
-            Res /= 4.
+        Res = M_bp * (D - P*f_prox[:,None])**2/V_new
 
+        # only reject one bad pixel per wavelength channel at a time
         bad_channels = np.any(Res>badpix_clip**2, axis=1)
         for x in wave_x[bad_channels]:
             M_bp[x, np.argmax(Res[x]-badpix_clip**2)] = False
@@ -1759,32 +1766,35 @@ def optimal_extraction(D_full, V_full, bpm_full, obj_cen,
         #     axes[1].imshow(M_bp, aspect='auto')
         #     plt.show()
 
-        # Optimally extracted spectrum, obtained by accounting
-        # for the profile and variance
-        f_opt = np.sum(M_bp*P*D/V_new, axis=1) / (np.sum(M_bp*P*P/V_new, axis=1) + etol)
-
-        # Calculate a new variance with the optimally extracted spectrum
-        V_new = V + np.abs(P*np.tile(f_opt, (P.shape[1],1)).T) / gain / NDIT
         if not np.any(bad_channels):
             break
 
     if debug:
-        print(ite)
+        # print(ite)
         plt.plot(f_opt)
         plt.show()
 
     # Rescale the variance by the reduced chi2
     chi2_r = np.nansum(Res)/(np.sum(M_bp)-len(f_opt))
+
     if chi2_r > 1:
         var = 1. / (np.sum(M_bp*P*P/V_new, axis=1)+etol) * chi2_r
     else:
         var = 1. / (np.sum(M_bp*P*P/V_new, axis=1)+etol)
     
-    return f_opt, np.sqrt(var), D.T, P.T, np.sqrt(V_new).T, chi2_r
+    # Optimally extracted spectrum
+    f_opt = np.sum(M_bp*P*D/V_new, axis=1) / (np.sum(M_bp*P*P/V_new, axis=1) + etol)
+    
+    # plt.plot(f_opt/np.sqrt(var))
+    # plt.show()
+
+    return f_opt, np.sqrt(var), D.T, V_new.T, P.T
+
+
 
 def func_wlen_optimization(poly, *args):
     """
-    objective function for optimizing wavelength solutions
+    cost function for optimizing wavelength solutions
 
     Parameters
     ----------
@@ -2024,7 +2034,7 @@ def SpecConvolve_GL(in_wlen, in_flux, out_res, gamma, in_res=1e6):
     return flux_V
 
 
-def PolyfitClip(x, y, order, clip=4., max_iter=20):
+def PolyfitClip(x, y, order, mask=None, clip=4., max_iter=20):
     """
     Perform weighted least-square polynomial fit,
     iterratively cliping pixels above a certain sigma threshold
@@ -2040,6 +2050,8 @@ def PolyfitClip(x, y, order, clip=4., max_iter=20):
         sigma clip threshold
     max_iter: int 
         max number of iteration in sigma clip
+    mask: bool
+        boolean array with the masked values set to False.
 
     Returns
     ----------
@@ -2049,40 +2061,17 @@ def PolyfitClip(x, y, order, clip=4., max_iter=20):
     coeffs: array
         best fit polynomial coefficient
     """
-    
-    # y_filtered = stats.sigma_clip(y, sigma=clip)
-    # if m is None:
-    #     mask = ~y_filtered.mask
-    # else:
-    #     mask = m & (~y_filtered.mask)
-
-    # if np.sum(mask) < 0.1*len(mask):
-    #     return np.zeros_like(y), np.zeros(order+1) #, m
-    # xx = np.copy(x)
-    # yy = np.copy(y)
-    # if w is None:
-    #     ww = np.ones_like(xx)
-    # else:
-    #     ww = np.copy(w)
-
-    # poly = Poly.polyfit(xx[mask], yy[mask], order, w=ww[mask])
-    # y_model = Poly.polyval(xx, poly)
-    # if plotting:
-    #     plt.plot(yy)
-    #     plt.plot(y_model)
-    #     plt.show()
-    # print(poly)
 
     x_mean = np.array(x) - np.nanmean(x) 
     A_full = np.vander(x_mean, order)
 
-    mask = np.ones_like(x_mean, dtype=bool)
+    if mask is None:
+        mask = np.ones_like(x_mean, dtype=bool)
+
     x_use = x_mean[mask]
     y_use = np.array(y)[mask]
 
     for i in range(max_iter):
-        x_use = x_use[mask]
-        y_use = y_use[mask]
         A_matrix = np.vander(x_use, order)
         coeffs = np.linalg.solve(np.dot(A_matrix.T, A_matrix), 
                                  np.dot(A_matrix.T, y_use))
@@ -2097,6 +2086,9 @@ def PolyfitClip(x, y, order, clip=4., max_iter=20):
         #     mask[np.argmax(np.abs(res))] = False
         else:
             break
+        x_use = x_use[mask]
+        y_use = y_use[mask]
+
     y_model = np.dot(A_full, coeffs)
     # print(coeffs, i)
     final_mask = (np.abs(y - y_model) > clip*np.std(res))
@@ -2122,6 +2114,7 @@ def PolyfitClip(x, y, order, clip=4., max_iter=20):
     #         break
     #     ite+=1
     return y_model, coeffs, final_mask
+
 
 def fit_continuum_clip(x, y, order, pixel_distance=50, sigma=1.5, max_iter=20):
     x_mean = x - np.nanmean(x) 
@@ -2312,15 +2305,14 @@ def get_spline_model(x_knots, x_samples, spline_degree=3):
 
 
 
-def stack_ragged(array_list, axis=0):
+def load_extr2D_old(filename):
     """
-    stack arrays with same number of columns but different number of rows
-    into a new array and record the indices of each sub array.
+    Method for reading the pipeline 2D extracted .npz files into arrays.
 
     Parameters
     ----------
-    array_list: list
-        the list of array to be stacked
+    filename : str
+        Path of the `EXTR2D` .npz file to load.
 
     Returns
     -------
@@ -2548,7 +2540,7 @@ def molecfit(input_path, spec, wave_range=None, Nedge=10, savename=None, verbose
     ----------
     input_path : str
         the working directory for molecfit.
-    spec: SPEC2D 
+    spec: SPEC
         input spectra for molecfit
     wave_range: list of tuple
         list of wavelength regions to be indcluded for the telluric fitting
